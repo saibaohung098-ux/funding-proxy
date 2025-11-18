@@ -35,81 +35,75 @@ export default async function handler(req, res) {
   }
 
   try {
-    const prompt = `
-Bạn là chuyên gia phân tích tài chính.
+    const systemPrompt = `
+Bạn là chuyên gia phân tích tài chính. 
+Hãy trả lời theo ĐÚNG format JSON dưới đây, không thêm text ngoài JSON.
 
-Hãy dùng web search để tìm thông tin về hoạt động gọi vốn của công ty/dự án thuộc domain: ${domain}
+Nếu không tìm được thông tin chính xác, để giá trị = null.
 
-Hãy trả về đúng dạng JSON (USD):
-
+Cấu trúc JSON:
 {
-  "has_raised": true/false,
-  "latest_round": "Seed/Series A/Series B/Recap/IPO/unknown",
-  "total_funding_usd": number or null,
-  "latest_revenue_usd": number or null,
-  "valuation_usd": number or null,
+  "has_raised": true hoặc false,
+  "latest_round": "Seed" | "Series A" | "Series B" | "Series C" | "IPO" | "Recap" | "unknown",
+  "total_funding_usd": số hoặc null,
+  "latest_revenue_usd": số hoặc null,
+  "valuation_usd": số hoặc null,
   "sources": ["url1", "url2"]
 }
-
-Chỉ trả về DUY NHẤT JSON object, không thêm chữ nào khác.
 `;
 
-    const response = await client.responses.create({
+    const userPrompt = `
+Domain: ${domain}
+
+Hãy cho tôi thông tin về:
+- Công ty/dự án đứng sau domain này đã từng gọi vốn chưa (has_raised)?
+- Nếu có, vòng gọi vốn mới nhất là gì (latest_round)?
+- Tổng số vốn đã gọi (total_funding_usd, USD)?
+- Doanh thu gần nhất (latest_revenue_usd, USD)?
+- Định giá gần nhất (valuation_usd, USD)?
+- Liệt kê 1-3 nguồn tham khảo (sources: mảng URL).
+`;
+
+    const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
-      input: prompt,
-      tools: [{ type: "web_search" }]
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ]
     });
 
-    // Lấy text từ Responses API
-    const content = response.output?.[0]?.content || [];
-    let text = null;
-
-    for (const c of content) {
-      if (typeof c.text === "string") {
-        text = c.text;
-        break;
-      }
-      if (c.text && typeof c.text.value === "string") {
-        text = c.text.value;
-        break;
-      }
-    }
-
+    const text = completion.choices?.[0]?.message?.content;
     if (!text) {
-      return res.status(500).json({ error: "No text from OpenAI" });
+      return res.status(500).json({ error: "No text from OpenAI (chat)" });
     }
-
-    // Làm sạch JSON
-    let t = text.trim();
-    if (t.startsWith("```")) {
-      t = t.replace(/```json/i, "").replace(/```/g, "").trim();
-    }
-
-    const first = t.indexOf("{");
-    const last = t.lastIndexOf("}");
-    if (first === -1 || last === -1 || last <= first) {
-      return res
-        .status(500)
-        .json({ error: "Cannot find JSON braces", raw: t });
-    }
-
-    const jsonSlice = t.substring(first, last + 1);
 
     let json;
     try {
-      json = JSON.parse(jsonSlice);
+      json = JSON.parse(text);
     } catch (e) {
-      return res.status(500).json({
-        error: "JSON parse error",
-        raw: jsonSlice
-      });
+      // Trường hợp model vẫn trả dư text, cố gắng cắt từ { ... }
+      let t = text.trim();
+      if (t.startsWith("```")) {
+        t = t.replace(/```json/i, "").replace(/```/g, "").trim();
+      }
+      const first = t.indexOf("{");
+      const last = t.lastIndexOf("}");
+      if (first === -1 || last === -1 || last <= first) {
+        return res.status(500).json({
+          error: "Cannot parse JSON from completion",
+          raw: t
+        });
+      }
+      const slice = t.substring(first, last + 1);
+      json = JSON.parse(slice);
     }
 
     return res.status(200).json(json);
   } catch (err) {
     console.error(err);
     return res.status(500).json({
-      error: "OpenAI error",
+      error: "OpenAI chat error",
       details: err.message
     });
   }
